@@ -5,12 +5,14 @@ import scipy
 from matplotlib import pyplot as plt
 
 #Add imports if needed:
+import sys
 from multiprocessing import Process, Value, Array, Manager
-from scipy.interpolate import interp2d, SmoothBivariateSpline
+# from scipy.interpolate import interp2d, SmoothBivariateSpline
 from tqdm import tqdm
 #end imports
 
 #Add extra functions here:
+sys.path.append('../code/')
 def hgen2cart(p, dtype = int):
     if dtype is int:
         cart_p = np.round(p / p[:,2].reshape(-1, 1, 1))[:,:2].reshape(-1, 2).astype(dtype)
@@ -432,8 +434,8 @@ def padalign_ims(wim1, im2, biases):
     wim1_padded = np.zeros((y_s, x_s, 3))
     im2_padded = np.zeros((y_s, x_s, 3))
     
-    if biases[0]>=0:
-        if biases[1]>=0:
+    if biases[1]>=0:
+        if biases[0]>=0:
             wim1_padded[biases[1]:biases[1]+y1, biases[0]:biases[0]+x1, :] = wim1
             im2_padded[0:y2, 0:x2, :] = im2
         else:
@@ -441,33 +443,90 @@ def padalign_ims(wim1, im2, biases):
             im2_padded[0:y2, -biases[0]:-biases[0]+x2, :] = im2
     else:
         if biases[0]>=0:
+            print(f'wim1: {wim1.shape[1]}')
+            print(f'wim1_padded: {wim1_padded[0:y1, biases[0]:biases[0]+x1, :].shape}')
             wim1_padded[0:y1, biases[0]:biases[0]+x1, :] = wim1
             im2_padded[-biases[1]:-biases[1]+y2, 0:x2, :] = im2
         else:
-            print(wim1.shape[1])
-            print(wim1_padded[0:y1, 0:x1, :].shape)
+            # print(wim1.shape[1])
+            # print(wim1_padded[0:y1, 0:x1, :].shape)
             wim1_padded[0:y1, 0:x1, :] = wim1
             im2_padded[-biases[1]:-biases[1]+y2, -biases[0]:-biases[0]+x2, :] = im2
 
     return wim1_padded, im2_padded
+
+
+def manual_stitch(im1, im2, N = 5, psr = None):
+    p1, p2 = getPoints(im1, im2, N, psr = psr)
+    p1, p2 = np.array(p1).T, np.array(p2).T
+    if psr is not None:
+        _, [y10, y11, x10, x11], [y20, y21, x20, x21] = psr
+        p1 = p1 + np.array([[x10], [y10]])
+        p2 = p2 + np.array([[x20], [y20]])
+    H = computeH(p1, p2)
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    print(biases)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch = imageStitching(im2_padded, wim1_padded)
+    return im_stitch
+ 
+
+def sift_stitch(im1, im2, N = 5):
+    p1, p2 = getPoints(im1, im2, N)
+    p1, p2 = np.array(p1).T, np.array(p2).T
+    H = computeH(p1, p2)
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch = imageStitching(im2_padded, wim1_padded)
+    return im_stitch
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #Extra functions end
 
 # HW functions:
 
 
-def mark_points(im, N, key):
+def mark_points(im, N, key, psr = None):
     plt.figure()
-    plt.imshow(im)
+    if psr is not None:
+        y0, y1, x0, x1 = psr[key]
+        plt.imshow(im[y0:y1, x0:x1])
+    else:
+        plt.imshow(im)
     plt.title(f'im{key}')
     p = plt.ginput(N, timeout = 0)
     return p
     
-def getPoints(im1,im2,N):
+def getPoints(im1,im2,N, psr = None):
     """
     Your code here
     """
-    p1 = mark_points(im1, N, 1)
-    p2 = mark_points(im2, N, 2)
+    p1 = mark_points(im1, N, 1, psr = psr)
+    p2 = mark_points(im2, N, 2, psr = psr)
     return p1,p2
 
 def computeH(p1, p2):
@@ -557,6 +616,8 @@ def warpH(im1, H, out_size, get_biases = False):
     
     x_rng = xs.max()+1
     y_rng = ys.max()+1
+    
+    print(x_rng, y_rng)
     warp_im1 = np.zeros((y_rng, x_rng, 3))
     # print(f'x_rng: {x_rng}')
     # print(f'y_rng: {y_rng}')
@@ -714,17 +775,67 @@ def ransacH(matches, locs1, locs2, nIter, tol):
     bestH = 0
     return bestH
 
-def getPoints_SIFT(im1,im2):
+def getPoints_SIFT(im1,im2, N = -1, draw = False):
     """
     Your code here
     """
-    p1,p2 = 0, 0
-    return p1,p2
+    gray1 = cv2.cvtColor((im1*255).astype(np.uint8),cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor((im2*255).astype(np.uint8),cv2.COLOR_BGR2GRAY)
+
+    # Initiate SIFT detector
+    sift = cv2.xfeatures2d.SIFT_create()
+    
+    # find the keypoints and descriptors with SIFT
+    kp1, des1 = sift.detectAndCompute(gray1,None)
+    kp2, des2 = sift.detectAndCompute(gray2,None)
+    
+    # FLANN parameters
+    FLANN_INDEX_KDTREE = 0
+    index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+    search_params = dict(checks=50)   # or pass empty dictionary
+    
+    flann = cv2.FlannBasedMatcher(index_params,search_params)
+    
+    matches = flann.knnMatch(des1,des2,k=2)
+    
+    # Need to draw only good matches, so create a mask
+    matchesMask = [[0,0] for i in range(len(matches))]
+    
+    # https://stackoverflow.com/questions/46607647/sift-feature-matching-point-coordinates
+    p1 = []
+    p2 = []
+    dists = []
+    
+    # ratio test as per Lowe's paper
+    for i,(m,n) in enumerate(matches):
+        if m.distance < 0.7*n.distance:
+            if i%5 == 0:
+                matchesMask[i]=[1,0]
+            dists.append(m.distance)
+            p1.append(list(kp1[m.queryIdx].pt))
+            p2.append(list(kp2[m.trainIdx].pt))
+    
+    if draw:
+        draw_params = dict(matchColor = (0,255,0),
+                       singlePointColor = (255,0,0),
+                       matchesMask = matchesMask,
+                       flags = 0)
+        img3 = cv2.drawMatchesKnn(im1,kp1,im2,kp2,matches,None,**draw_params)
+        plt.figure()
+        plt.imshow(img3,)
+    p1, p2 = np.array(p1), np.array(p2)
+    if N == -1:
+        return p1.T, p2.T
+    dists = np.array(dists)
+    best = np.argsort(dists)[:N]
+    return p1[best].T ,p2[best].T
+    
+    
 
 if __name__ == '__main__':
     print('my_homography')
-    im1 = plt.imread('data/incline_L.png')
-    im2 = plt.imread('data/incline_R.png')
+    im1 = plt.imread('../code/data/incline_L.png')
+    im2 = plt.imread('../code/data/incline_R.png')
 
     N = 5
     #%%
@@ -745,16 +856,28 @@ if __name__ == '__main__':
     plt.scatter(p1_cmp_nrm[:,0], p1_cmp_nrm[:,1])
     
     
-    plt.figure(10)
+    plt.figure()
     plt.subplot(3,1,1)
     plt.imshow(im1)
     wim1 = warpH(im1, H, (10, 10))
-    plt.figure(10)
     plt.subplot(3,1,2)
     plt.imshow(wim1)
     plt.subplot(3,1,3)
     plt.imshow(im2)
 
+    
+    plt.figure(10)
+    plt.subplot(3,1,1)
+    plt.imshow(im1)
+    
+    im1_lab = cv2.cvtColor((im1*255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float64)/255
+    wim1_lab = warpH(im1_lab, H, 0)
+    wim1_rgb = cv2.cvtColor((wim1_lab*255).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float64)/255
+    
+    plt.subplot(3,1,2)
+    plt.imshow(wim1)
+    plt.subplot(3,1,3)
+    plt.imshow(im2)
     
     wim1, biases = warpH(im1, H, 0, get_biases = True)
     
@@ -767,6 +890,68 @@ if __name__ == '__main__':
     plt.imshow(im2_padded)
     plt.figure()
     plt.imshow(im_stitch)
+
+    plt.figure()    
+    plt.imshow(wim1_rgb)
+    plt.figure()
+    plt.imshow(wim1)
+    
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 70*N, draw = 1)
+    # sift_p1, sift_p2 = np.array(sift_p1).T, np.array(sift_p2).T
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch = imageStitching(sift_im2_padded, sift_wim1_padded)
+    
+    plt.figure()
+    plt.subplot(2,1,1)
+    plt.imshow(sift_im2_padded)
+    plt.subplot(2,1,2)
+    plt.imshow(sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch)
+    
+    
+    #%%
+    bims = []
+    
+    for i in range(1,6):
+        bim = plt.imread(f'../code/data/beach{i}.jpg')
+        bim = cv2.resize(bim, (bim.shape[0] // 3, bim.shape[1] // 3),)
+        bims.append(bim.astype(float)/255)
+    
+    psr = [[], [0, 200, 0, -1], [0, -1, 0, -1]]
+    im_stitch0 = manual_stitch(bims[0], bims[1], psr = psr)
+    plt.figure()
+    plt.imshow(im_stitch0)
+    im_stitch1 = manual_stitch(im_stitch0, bims[2], psr = psr)
+    plt.figure()
+    plt.imshow(im_stitch1)
+    psr = None#[[], [0, 500, 2500, 4500], [0, -1, 0, -1]]
+    im_stitch2 = manual_stitch(im_stitch1, bims[3], psr = psr)
+    plt.figure()
+    plt.imshow(im_stitch2)
+    im_stitch3 = manual_stitch(im_stitch2, bims[4], psr = psr)
+    plt.figure()
+    plt.imshow(im_stitch3)
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     
     """
     Your code here
