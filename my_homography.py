@@ -9,6 +9,7 @@ import sys
 from multiprocessing import Process, Value, Array, Manager
 # from scipy.interpolate import interp2d, SmoothBivariateSpline
 from tqdm import tqdm
+from itertools import combinations
 #end imports
 
 #Add extra functions here:
@@ -23,10 +24,23 @@ def hgen2cart(p, dtype = int):
 def poject(p2, H, dtype = int):
     N = len(p2)
     p2_hgen = np.concatenate((p2, np.ones((N, 1))), 1)
+    
+    # print(f'p2_hgen: {p2_hgen}')
     p1_computed = H @ p2_hgen.reshape(N, 3, 1)
     p1_cmp_nrm = hgen2cart(p1_computed, dtype = dtype)
     return p1_cmp_nrm
 
+def mark_points(im, N, key, psr = None):
+    plt.figure()
+    if psr is not None:
+        y0, y1, x0, x1 = psr[key]
+        plt.imshow(im[y0:y1, x0:x1])
+    else:
+        plt.imshow(im)
+    plt.title(f'im{key}')
+    p = plt.ginput(N, timeout = 0)
+    return p
+    
 class yaninterp2d:
     '''
     class used to performe interpolation in image plane
@@ -430,24 +444,28 @@ def padalign_ims(wim1, im2, biases):
     if biases[1]<0:
         y_s = max(y1, y2 - biases[1]+1)
         
-    print(x_s, y_s)
+    # print(x_s, y_s)
     wim1_padded = np.zeros((y_s, x_s, 3))
     im2_padded = np.zeros((y_s, x_s, 3))
     
     if biases[1]>=0:
         if biases[0]>=0:
+            # print(f'pa: c0')
             wim1_padded[biases[1]:biases[1]+y1, biases[0]:biases[0]+x1, :] = wim1
             im2_padded[0:y2, 0:x2, :] = im2
         else:
+            # print(f'pa: c1')
             wim1_padded[biases[1]:biases[1]+y1, 0:x1, :] = wim1
             im2_padded[0:y2, -biases[0]:-biases[0]+x2, :] = im2
     else:
         if biases[0]>=0:
-            print(f'wim1: {wim1.shape[1]}')
-            print(f'wim1_padded: {wim1_padded[0:y1, biases[0]:biases[0]+x1, :].shape}')
+            # print(f'pa: c2')
+            # print(f'wim1: {wim1.shape[1]}')
+            # print(f'wim1_padded: {wim1_padded[0:y1, biases[0]:biases[0]+x1, :].shape}')
             wim1_padded[0:y1, biases[0]:biases[0]+x1, :] = wim1
             im2_padded[-biases[1]:-biases[1]+y2, 0:x2, :] = im2
         else:
+            # print(f'pa: c3')
             # print(wim1.shape[1])
             # print(wim1_padded[0:y1, 0:x1, :].shape)
             wim1_padded[0:y1, 0:x1, :] = wim1
@@ -455,6 +473,53 @@ def padalign_ims(wim1, im2, biases):
 
     return wim1_padded, im2_padded
 
+def fill_triangle(points,im_size):
+    im = np.ones(im_size)
+    xx, yy = np.meshgrid(np.arange(im_size[1]), np.arange(im_size[0]))
+    perms = np.array([[0,1,2], [0,2,1], [1,2,0]])
+    xmin = np.min(points[:,0])
+    xmax = np.max(points[:,0])
+    ymin = np.min(points[:,1])
+    ymax = np.max(points[:,1])
+    for perm in perms:
+        points_perm = points[perm]
+        A = np.concatenate((np.ones((2,1)), points_perm[:2,0].reshape(-1,1)), 1)
+        if points_perm[0,0] == points_perm[1,0]:
+            if points_perm[2,0] == points_perm[1,0]:
+                bl = xx != points_perm[2,0]
+            elif points_perm[2,0] < points_perm[1,0]:
+                bl = xx > points_perm[0,0]
+            else:
+                bl = xx < points_perm[0,0]
+        else:
+            param = np.linalg.pinv(A)@points_perm[:2,1]
+            xxflt = xx.reshape(-1,1)
+            yyflt = yy.reshape(-1)
+            B = np.concatenate((np.ones((len(xxflt),1)), xxflt), 1)
+            val = round(param@np.array([1,points_perm[2,0]]),1)
+            if val == points_perm[2,1]:
+                blflt = np.round(B@param, decimals = 1) != yyflt
+            elif val > points_perm[2,1]:
+                blflt = np.round(B@param, decimals = 1) <= (yyflt+20)
+            else:
+                blflt = np.round(B@param, decimals = 1) >= (yyflt-20)
+            bl = blflt.reshape(*xx.shape)
+
+        im[bl] = 0
+    return im
+
+def fill_shape(points, im_size):
+    im = np.zeros(im_size)
+    for combi in combinations(points, 3):
+        im +=  fill_triangle(np.array(combi), im_size)
+    im = im>0
+    return im
+
+def ransac_iternum(
+        inlier_ratio = 0.3,
+        success_probability = 0.999
+    ):
+    return np.ceil(np.log(1-success_probability)/np.log(1-inlier_ratio**4)).astype(int)
 
 def manual_stitch(im1, im2, N = 5, psr = None):
     p1, p2 = getPoints(im1, im2, N, psr = psr)
@@ -508,18 +573,6 @@ def sift_stitch(im1, im2, N = 5):
 #Extra functions end
 
 # HW functions:
-
-
-def mark_points(im, N, key, psr = None):
-    plt.figure()
-    if psr is not None:
-        y0, y1, x0, x1 = psr[key]
-        plt.imshow(im[y0:y1, x0:x1])
-    else:
-        plt.imshow(im)
-    plt.title(f'im{key}')
-    p = plt.ginput(N, timeout = 0)
-    return p
     
 def getPoints(im1,im2,N, psr = None):
     """
@@ -556,12 +609,38 @@ def warpH(im1, H, out_size, get_biases = False):
     
     
     y, x = np.meshgrid(np.arange(out_size[0]), np.arange(out_size[1]))
+    eadgs = np.array([[0, 0], [0, out_size[0]], [out_size[1], 0], [out_size[1], out_size[0]]])
     # x += im1.shape[0]//2 - out_size[0]//2
     # y += im1.shape[1]//2 - out_size[1]//2
     # print(f'x, y: {x, y}')
     p1 = np.stack((x.flatten(), y.flatten())).T
-    p2_proj = poject(p1, np.linalg.inv(H))
-    p1_proj  = poject(p2_proj, H, dtype = float)
+    p2_eadgs = poject(eadgs, np.linalg.inv(H))
+    # plt.figure(100)
+    # plt.imshow(im2)
+    # plt.scatter(p2_eadgs[:,0], p2_eadgs[:,1],  s = 1)
+    
+    x_bias = p2_eadgs[:, 0].min()
+    y_bias = p2_eadgs[:, 1].min()
+    
+
+    p2_eadgs[:, 0] = p2_eadgs[:, 0] - x_bias
+    p2_eadgs[:, 1] = p2_eadgs[:, 1] - y_bias
+
+    x_rng = p2_eadgs[:, 0].max()+1
+    y_rng = p2_eadgs[:, 1].max()+1
+    
+    bl = fill_shape(p2_eadgs, (y_rng, x_rng))
+    # plt.figure()
+    # plt.imshow(bl)
+    xx, yy = np.meshgrid(np.arange(x_rng), np.arange(y_rng))
+    xx = xx[bl]#.flatten()
+    yy = yy[bl]#.flatten()
+    xs = xx#[.flatten()]
+    ys = yy#[bl.flatten()]
+    
+    p2_proj = np.stack((xs+x_bias,ys+y_bias)).T 
+    # p2_proj = poject(p1, np.linalg.inv(H))
+    p1_proj = poject(p2_proj, H, dtype = float)
     # print(f'p1_proj: {p1_proj}')
     
     # plt.figure(100)
@@ -579,22 +658,49 @@ def warpH(im1, H, out_size, get_biases = False):
     # plt.imshow(im1)
     # plt.scatter(p1_proj[::314,0], p1_proj[::314,1], s = 1)
     
-    accepted = (p1_proj[:, 0]>0)            \
-              *(p1_proj[:, 0]<im1.shape[0]) \
-              *(p1_proj[:, 1]>0)            \
-              *(p1_proj[:, 1]<im1.shape[1])
-    accepted = accepted.astype(bool)
+    # accepted = (p1_proj[:, 0]>0)            \
+    #           *(p1_proj[:, 0]<im1.shape[0]) \
+    #           *(p1_proj[:, 1]>0)            \
+    #           *(p1_proj[:, 1]<im1.shape[1])
+    # accepted = accepted.astype(bool)
     # print(accepted[500:550])
     us = p1_proj[:, 0]#[accepted]
     vs = p1_proj[:, 1]#[accepted]
     # print(f'us: {us}')
     # print(f'vs: {vs}')
     
-    x_bias = p2_proj[:, 0].min()
-    y_bias = p2_proj[:, 1].min()
+    # x_bias = p2_proj[:, 0].min()
+    # y_bias = p2_proj[:, 1].min()
+    # p2_eadgs[:, 0] = p2_eadgs[:, 0] - x_bias
+    # p2_eadgs[:, 1] = p2_eadgs[:, 1] - y_bias
     
-    xs = (p2_proj[:, 0] - x_bias)#[accepted]
-    ys = (p2_proj[:, 1] - y_bias)#[accepted]
+    # xs = (p2_proj[:, 0] - x_bias)#[accepted]
+    # ys = (p2_proj[:, 1] - y_bias)#[accepted]
+    
+    # x_rng = xs.max()+1
+    # y_rng = ys.max()+1
+
+    
+    # bl = fill_shape(p2_eadgs, (y_rng, x_rng)).flatten()
+    # yy, xx = np.meshgrid(np.arange(y_rng), np.arange(x_rng))
+    # xx = xx.flatten()
+    # yy = yy.flatten()
+    # xs = xx[bl.flatten()]
+    # ys = yy[bl.flatten()]
+    
+    # p2 = np.stack((xs+x_bias,ys+y_bias)).T
+        
+    # p1_proj = poject(p2, H, dtype = float)
+    # us = p1_proj[:, 0]
+    # vs = p1_proj[:, 1]
+    
+    # plt.figure()
+    # plt.imshow(im1)
+    # # plt.scatter(xs[::1000], ys[::1000])
+    # plt.scatter(us[::1000], vs[::1000])
+    # plt.scatter(p2_eadgs[:,0]+x_bias, p2_eadgs[:,1]+y_bias)
+    # plt.scatter(eadgs[:,0], eadgs[:,1])
+    
     # print(f'xs: {xs}')
     # print(f'ys: {ys}')
     # warp_im1 = np.zeros((*out_size[:2], 3))
@@ -604,8 +710,8 @@ def warpH(im1, H, out_size, get_biases = False):
     # plt.imshow(im1)
     # plt.scatter(us[::314], vs[::314])
     
-    # # print(p1_cmp_nrm.shape)
-    # # print(p1_cmp_nrm[1000:1100])
+    # # # print(p1_cmp_nrm.shape)
+    # # # print(p1_cmp_nrm[1000:1100])
     # plt.subplot(1,3,2)
     # plt.imshow(im2)
     # plt.scatter(xs[::314], ys[::314], s = 1)
@@ -614,10 +720,8 @@ def warpH(im1, H, out_size, get_biases = False):
     # plt.imshow(im1)
     # plt.scatter(p1_proj[::314,0], p1_proj[::314,1], s = 1)
     
-    x_rng = xs.max()+1
-    y_rng = ys.max()+1
     
-    print(x_rng, y_rng)
+    # print(x_rng, y_rng)
     warp_im1 = np.zeros((y_rng, x_rng, 3))
     # print(f'x_rng: {x_rng}')
     # print(f'y_rng: {y_rng}')
@@ -630,6 +734,10 @@ def warpH(im1, H, out_size, get_biases = False):
         )
         # print(f'warp_im1.shape: {warp_im1.shape}')
         warp_im1[ys, xs, ch] = interpolator(us, vs)
+        
+        # plt.figure()
+        # plt.imshow(warp_im1)
+        # plt.scatter(p2_eadgs[:,0], p2_eadgs[:,1])
     
         '''
         bs = 100
@@ -652,18 +760,27 @@ def warpH(im1, H, out_size, get_biases = False):
             warp_im1[ys[bs*i:bs*(i+1)], xs[bs*i:bs*(i+1)], ch] = warped_vals[np.arange(bsip), np.arange(bsip)]
     
         '''
+        '''
         yy, xx = np.meshgrid(np.arange(1,warp_im1.shape[0]-1), np.arange(1,warp_im1.shape[1]-1))
         yy = yy.flatten()
         xx = xx.flatten()
+        
+        bb = warp_im1[yy, xx, ch]==0
+        plt.figure()
+        plt.imshow(fill_shape(p2_eadgs, (warp_im1.shape[0]-2, warp_im1.shape[1]-2)))
+        plt.figure()
+        bb = fill_shape(p2_eadgs, (warp_im1.shape[0]-2, warp_im1.shape[1]-2)).flatten()
+        
+        
         bb = (warp_im1[yy, xx, ch]==0)      \
             *((warp_im1[yy-1, xx-1, ch]!=0) \
-             +(warp_im1[yy, xx-1, ch]!=0)   \
-             +(warp_im1[yy-1, xx, ch]!=0)   \
-             +(warp_im1[yy-1, xx+1, ch]!=0) \
-             +(warp_im1[yy, xx+1, ch]!=0)   \
-             +(warp_im1[yy+1, xx-1, ch]!=0) \
-             +(warp_im1[yy+1, xx, ch]!=0)   \
-             +(warp_im1[yy+1, xx+1, ch]!=0))
+            +(warp_im1[yy, xx-1, ch]!=0)    \
+            +(warp_im1[yy-1, xx, ch]!=0)    \
+            +(warp_im1[yy-1, xx+1, ch]!=0)  \
+            +(warp_im1[yy, xx+1, ch]!=0)    \
+            +(warp_im1[yy+1, xx-1, ch]!=0)  \
+            +(warp_im1[yy+1, xx, ch]!=0)    \
+            +(warp_im1[yy+1, xx+1, ch]!=0))
         bb = bb.astype(bool)
         # print(f'bb: {bb.shape}')
         # print(f'yy: {yy.shape}')
@@ -697,9 +814,9 @@ def warpH(im1, H, out_size, get_biases = False):
         # plt.subplot(1,3,3)
         # plt.imshow(im1)
         # plt.scatter(mp1_proj[::2,0], mp1_proj[::2,1], s = 1)
-
-
+        
         warp_im1[yys[accepted], xxs[accepted], ch] = interpolator(mus, mvs)
+        '''
         #'''
     if get_biases:
         return warp_im1, [x_bias, y_bias]
@@ -768,14 +885,27 @@ def imageStitching(img1, wrap_img2):
     # dim_start = 
     return panoImg
 
-def ransacH(matches, locs1, locs2, nIter, tol):
+def ransacH(locs1, locs2, nIter, tol):
     """
     Your code here
     """
-    bestH = 0
-    return bestH
+    best_agrrement = 0
+    for i in range(nIter):
+        sample = np.random.permutation(np.arange(len(locs1.T)))[:4]
+        p1, p2 = locs1.T[sample].T, locs2.T[sample].T
+        # print(f'p1, p2: {p1, p2}')
+        H = computeH(p1, p2)
+        p1_proj = poject(locs2.T, H)
+        residuals = np.linalg.norm(p1_proj-locs1.T, 2, axis = 1)
+        agreed = residuals < tol
+        agrrement = np.sum(agreed)
+        if agrrement > best_agrrement:
+            best_H = H
+            best_agrrement = agrrement
+    
+    return best_H
 
-def getPoints_SIFT(im1,im2, N = -1, draw = False):
+def getPoints_SIFT(im1,im2, N = -1, draw = False, rng = False):
     """
     Your code here
     """
@@ -824,13 +954,104 @@ def getPoints_SIFT(im1,im2, N = -1, draw = False):
         plt.figure()
         plt.imshow(img3,)
     p1, p2 = np.array(p1), np.array(p2)
-    if N == -1:
+    if N < 0:
         return p1.T, p2.T
     dists = np.array(dists)
+    if rng:
+        perm = np.random.permutation(np.arange((len(dists))))[:N]
+        return p1[perm].T ,p2[perm].T
     best = np.argsort(dists)[:N]
     return p1[best].T ,p2[best].T
     
+def blender(im1, im2):
+    '''
+    generates a blended panoramaimage of two axis aligned images.
+
+    Parameters
+    ----------
+    im1 : np.ndarray
+        image to blend.
+    im2 : np.ndarray
+        image to blend.
+
+    Returns
+    -------
+    blend : np.ndarray
+        a blending of the two input images.
+
+    '''
+    mask1 = np.sum(im1, 2)>0  
+    mask2 = np.sum(im2, 2)>0
+    inter = mask1*mask2
     
+    xmat = inter*np.arange(im1.shape[1]).reshape(1, -1)
+    ymat = inter*np.arange(im1.shape[0]).reshape(-1, 1)
+    interxs = np.min(
+        xmat + (xmat==0)*np.max(xmat)
+    )
+    interxe = np.max(
+        xmat + (xmat==0)*np.max(xmat)
+    ) +1
+    interys = np.min(
+        ymat + (ymat==0)*np.max(ymat)
+    )
+    interye = np.max(
+        ymat + (ymat==0)*np.max(ymat)
+    ) +1
+
+    cg1x = np.mean(mask1*np.arange(im1.shape[1]).reshape(1, -1))
+    cg1y = np.mean(mask1*np.arange(im1.shape[0]).reshape(-1, 1))
+    cg2x = np.mean(mask2*np.arange(im2.shape[1]).reshape(1, -1))
+    cg2y = np.mean(mask2*np.arange(im2.shape[0]).reshape(-1, 1))
+
+    # print(cg1x, cg1y, cg2x, cg2y)
+
+    dx = cg1x - cg2x
+    dy = cg1y - cg2y
+    
+    rx = dx*abs(dx)/(dx**2+dy**2)
+    ry = dy*abs(dy)/(dx**2+dy**2)
+    
+    xx, yy = np.meshgrid(
+        np.arange(interxe-interxs),
+        np.arange(interye-interys)
+    )
+    
+    rr1 = abs(rx)*(rx<0)        \
+          + xx/(interxe-interxs-1)*rx \
+          + abs(ry)*(ry<0)      \
+          + yy/(interye-interys-1)*ry
+    rr2 = 1-rr1
+    rr1 = np.repeat(rr1.reshape(*rr1.shape,1), 3, 2)
+    rr2 = np.repeat(rr2.reshape(*rr2.shape,1), 3, 2)
+    
+    weight1 = np.ones_like(im1)
+    weight2 = np.ones_like(im1)
+    
+    # print(rr1.shape)
+    # print(weight1[inter].shape)
+    # print(np.sum(inter[interys:interye+1, interxs:interxe+1]))
+    # print(np.sum(inter))
+    # print(interys, interye, interxs, interxe)
+    
+    # plt.figure()
+    # plt.imshow(rr1)
+    # plt.figure()
+    # plt.imshow(rr2)
+    # plt.figure()
+    # plt.imshow(inter[interys:interye+1, interxs:interxe+1])
+    # plt.figure()
+    # plt.imshow(inter)
+
+    
+    weight1[inter] *= rr1[inter[interys:interye, interxs:interxe]]
+    weight2[inter] *= rr2[inter[interys:interye, interxs:interxe]]
+    
+    blend = im1*weight1 + im2*weight2
+    
+    return blend
+    
+
 
 if __name__ == '__main__':
     print('my_homography')
@@ -912,38 +1133,414 @@ if __name__ == '__main__':
     plt.imshow(sift_im_stitch)
     
     
+  
     #%%
+    
     bims = []
+    Hs = [0, 1, 2, 3]
     
     for i in range(1,6):
         bim = plt.imread(f'../code/data/beach{i}.jpg')
-        bim = cv2.resize(bim, (bim.shape[0] // 3, bim.shape[1] // 3),)
+        bim = cv2.resize(bim, (bim.shape[0] // 1, bim.shape[1] // 1),)
         bims.append(bim.astype(float)/255)
     
-    psr = [[], [0, 200, 0, -1], [0, -1, 0, -1]]
-    im_stitch0 = manual_stitch(bims[0], bims[1], psr = psr)
+    #%%
+    
+    #### manual panorama beach full res
+    
+    im1, im2 = bims[3], bims[2]
+    
+    p2 = np.array(
+        [[304, 285, 872, 798, 1050],
+         [572, 376, 477, 584, 646]]
+    )
+    p1 = np.array(
+        [[258, 247, 842, 774, 1039],
+         [1481, 1266, 1336, 1461, 1509]]
+    )
+    H = computeH(p1, p2)
+    
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch = imageStitching(im2_padded, wim1_padded)
+    plt.figure()
+    plt.imshow(im_stitch)
+    
+    
+    im1, im2 = bims[4], im_stitch
+    
+    p1 = np.array(
+        [[515, 871, 856, 1061, 951],
+         [1036, 755, 958, 1021, 1196]]
+    )
+    p2 = np.array(
+        [[714, 1211, 1162, 1412, 1230],
+         [562, 138, 464, 589, 809]]
+    )
+    
+    H = computeH(p1, p2)
+    
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch = imageStitching(im2_padded, wim1_padded)
+    plt.figure()
+    plt.imshow(im_stitch)
+    
+    im1, im2 = bims[1], im_stitch
+    
+    p2 = np.array(
+        [[565, 814, 1080, 1406, 1369],
+         [4424, 4303, 4637, 4268, 4516]]
+    )
+    p1 = np.array(
+        [[15, 263, 542, 885, 834],
+         [322, 191, 508, 167, 412]]
+    )
+    
+    H = computeH(p1, p2)
+    
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch0 = imageStitching(im2_padded, wim1_padded)
+    
     plt.figure()
     plt.imshow(im_stitch0)
-    im_stitch1 = manual_stitch(im_stitch0, bims[2], psr = psr)
+
+    im1, im2 = bims[0], im_stitch0
+    
+    p1 = np.array(
+        [[442, 820, 1180, 352, 739],
+         [384, 843, 814, 587, 347]]
+    )
+
+    p2 = np.array(
+        [[926, 1458, 1989, 789, 1277],
+         [5364, 6266, 6122, 5728, 5286]]
+    )
+    H = computeH(p1, p2)
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    plt.figure()
+    plt.imshow(wim1_padded)
+    plt.figure()
+    plt.imshow(im2_padded)
+    im_stitch1 = imageStitching(im2_padded, wim1_padded)
+
     plt.figure()
     plt.imshow(im_stitch1)
-    psr = None#[[], [0, 500, 2500, 4500], [0, -1, 0, -1]]
-    im_stitch2 = manual_stitch(im_stitch1, bims[3], psr = psr)
+
+    #%%
+    
+    #### SIFT panorama beach full res
+    
+    im1, im2 = bims[3], bims[2]
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 20, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch0 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch0)
+    
+    im1, im2 = bims[4], sift_im_stitch0
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 20, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch1 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch1)
+    
+    im1, im2 = bims[1], sift_im_stitch1
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 20, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch2 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch2)
+
+    im1, im2 = bims[0], sift_im_stitch2
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 20, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch3 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch3)
+
+
+    #%%
+    
+    #### SIFT panorama beach full res with RANSAC
+    
+    im1, im2 = bims[3], bims[2]
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch0 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch0)
+    
+    im1, im2 = bims[4], sift_im_stitch0
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch1 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch1)
+    
+    im1, im2 = bims[1], sift_im_stitch1
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch2 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch2)
+
+    im1, im2 = bims[0], sift_im_stitch2
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch3 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch3)
+    
+
+    
+    
+    #%%
+    
+
+    
+    #%%
+    
+
+    #%%
+    
+    #### panorama sintra full res
+    sims = []
+    Hs = [0, 1, 2, 3]
+    ds = 5
+    for i in range(1,6):
+        sim = plt.imread(f'../code/data/sintra{i}.JPG')
+        sim = cv2.resize(sim, (sim.shape[0] // 1, sim.shape[1] // 1),)
+        sims.append(sim.astype(float)/255)
+
+
+    #%%
+    
+    #### manual panorama sintra full res
+    im1, im2 = sims[3], sims[2]
+    
+    p1 = np.array(
+        [[1058, 1063, 1351, 2017, 2050],
+         [1297, 1730, 624, 1246, 1652]]
+    )
+    p2 = np.array(
+        [[292, 277, 644, 1233, 1239],
+         [1227, 1669, 619, 1364, 1750]]
+    )
+    
+    H = computeH(p1, p2)
+    
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    plt.figure()
+    plt.imshow(wim1)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch0 = imageStitching(im2_padded, wim1_padded)
+    plt.figure()
+    plt.imshow(im_stitch0)
+    
+    
+    im1, im2 = sims[4], im_stitch0
+    
+    p1 = np.array(
+        [[1956, 2052, 1573, 1592, 1496],
+         [845, 2202, 2210, 557, 1324]]
+    )
+    p2 = np.array(
+        [[1536, 1467, 986, 1227, 1008],
+         [1552, 2870, 2766, 1106, 1825]]
+    )
+    
+
+    
+    H = computeH(p1, p2)
+    
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch1 = imageStitching(im2_padded, wim1_padded)
+    plt.figure()
+    plt.imshow(im_stitch1)
+    
+    im1, im2 = sims[1], im_stitch1
+    
+    p2 = np.array(
+        [[4262, 4360, 4078, 4723, 4712],
+         [3156, 2406, 2944, 3132, 2190]]
+    )
+    p1 = np.array(
+        [[914, 1061, 750, 1343, 1400],
+         [1738, 1032, 1493, 1799, 919]]
+    )
+    
+    H = computeH(p1, p2)
+    
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch2 = imageStitching(im2_padded, wim1_padded)
+    
     plt.figure()
     plt.imshow(im_stitch2)
-    im_stitch3 = manual_stitch(im_stitch2, bims[4], psr = psr)
+    
+    im1, im2 = sims[0], im_stitch2
+    
+    p1 = np.array(
+        [[724, 760, 996, 608, 981],
+         [2357, 1371, 1816, 1830, 1509]]
+    )
+
+    p2 = np.array(
+        [[5368, 5234, 5650, 5126, 5559],
+         [3949, 2783, 3195, 3363, 2832]]
+    )
+    
+    H = computeH(p1, p2)
+    wim1, biases = warpH(im1, H, 0, get_biases = True)
+    wim1_padded, im2_padded = padalign_ims(wim1, im2, biases)
+    im_stitch3 = imageStitching(im2_padded, wim1_padded)
+
     plt.figure()
     plt.imshow(im_stitch3)
+
+    
+    #%%
+    
+    #### SIFT panorama sintra full res
+
+    
+    im1, im2 = sims[3], sims[2]
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 20, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch0 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch0)
+    
+    im1, im2 = sims[4], sift_im_stitch0
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 4, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch1 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch1)
+    
+    im1, im2 = sims[1], sift_im_stitch1
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 20, draw = 0, rng = True)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch2 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch2)
+
+    im1, im2 = sims[0], sift_im_stitch2
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 4, draw = 1)
+    sift_H = computeH(sift_p1, sift_p2)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch3 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch3)
+    
+    #%%
+    
+    #### SIFT panorama sintra full res with RANSAC
+    
+    im1, im2 = sims[3], sims[2]
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch0 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch0)
+    
+    im1, im2 = sims[4], sift_im_stitch0
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch1 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch1)
+    
+    im1, im2 = sims[1], sift_im_stitch1
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch2 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch2)
+
+    im1, im2 = sims[0], sift_im_stitch2
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch3 = imageStitching(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch3)
+
+    #%%
+    #### SIFT panorama sintra full res with RANSAC using blending
+    im1, im2 = sims[3], sims[2]
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch0 = blender(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch0)
+    
+    im1, im2 = sims[4], sift_im_stitch0
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch1 = blender(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch1)
+    
+    im1, im2 = sims[1], sift_im_stitch1
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch2 = blender(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch2)
+
+    im1, im2 = sims[0], sift_im_stitch2
+    sift_p1, sift_p2 = getPoints_SIFT(im1, im2, N = 300, draw = 0)
+    sift_H = ransacH(sift_p1, sift_p2, nIter = ransac_iternum(), tol = 20)
+    sift_wim1, sift_biases = warpH(im1, sift_H, 0, get_biases = True)
+    sift_wim1_padded, sift_im2_padded = padalign_ims(sift_wim1, im2, sift_biases)
+    sift_im_stitch3 = blender(sift_im2_padded, sift_wim1_padded)
+    plt.figure()
+    plt.imshow(sift_im_stitch3)
+
     
     
-    
-    
-    
-    
-    
-    
-    
-    
+
     
     
     
